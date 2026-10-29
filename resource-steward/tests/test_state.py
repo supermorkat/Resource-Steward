@@ -46,4 +46,14 @@ class StoreTests(unittest.TestCase):
                 for n in range(230): store.event('sample', str(n))
                 self.assertLessEqual(store.event_count(), 200)
 
+    def test_alert_recovery_is_recorded_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            with Store(Path(d) / 'state.sqlite') as store:
+                self.assertEqual(store.update_alerts({'ram'}), {'new': ['ram'], 'cleared': []})
+                self.assertEqual(store.update_alerts({'ram'}), {'new': [], 'cleared': []})
+                self.assertEqual(store.update_alerts({'disk'}), {'new': ['disk'], 'cleared': ['ram']})
+                self.assertEqual(store.update_alerts({'disk'}), {'new': [], 'cleared': []})
+                events = [tuple(row) for row in store.db.execute('SELECT kind, details FROM events ORDER BY id')]
+                self.assertEqual(events, [('alert', 'ram'), ('alert_cleared', 'ram'), ('alert', 'disk')])
+
 if __name__ == '__main__': unittest.main()

@@ -149,4 +149,191 @@ class CliTests(unittest.TestCase):
             first.wait(timeout=4)
             first.stderr.close()
 
+    def test_daemon_reports_new_and_cleared_alerts(self):
+        (self.cg / 'memory.current').write_text(str(700 * MIB))
+        first = subprocess.run(self.args + ['daemon', '--once'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_scan = [json.loads(line) for line in first.stdout.splitlines()][-1]
+        self.assertIn('headroom < 384 MiB', first_scan['new_alerts'])
+        self.assertIn('cgroup_usage >= 80%', first_scan['new_alerts'])
+        (self.cg / 'memory.current').write_text(str(100 * MIB))
+        second = subprocess.run(self.args + ['daemon', '--once'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        second_scan = [json.loads(line) for line in second.stdout.splitlines()][-1]
+        self.assertIn('headroom < 384 MiB', second_scan['cleared_alerts'])
+        self.assertIn('cgroup_usage >= 80%', second_scan['cleared_alerts'])
+        third = subprocess.run(self.args + ['daemon', '--once'], capture_output=True, text=True, timeout=5)
+        self.assertEqual([json.loads(line) for line in third.stdout.splitlines()][-1]['cleared_alerts'], [])
+
+    def test_preflight_rejects_unknown_disk(self):
+        missing = self.root / 'missing-root'
+        args = [sys.executable, str(SCRIPT), '--root', str(missing), '--cgroup', str(self.cg),
+                '--meminfo', str(self.mem), 'preflight']
+        run = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 3, run.stderr)
+        self.assertIn('disk_free_unavailable', json.loads(run.stdout)['policy']['reasons'])
+
+    def test_run_stops_when_memory_telemetry_disappears(self):
+        pidfile = self.root / 'telemetry-child.pid'
+        code = (f'from pathlib import Path; import os,time; '
+                f'Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(30)')
+        runner = subprocess.Popen(self.args + ['run', '--', sys.executable, '-c', code],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 4
+            while not pidfile.exists() and time.monotonic() < deadline: time.sleep(.03)
+            self.assertTrue(pidfile.exists())
+            child_pid = int(pidfile.read_text())
+            (self.cg / 'memory.current').unlink()
+            out, err = runner.communicate(timeout=8)
+            self.assertEqual(runner.returncode, 125, (out, err))
+            lines = [json.loads(line) for line in out.splitlines()]
+            error = next(line for line in lines if line['status'] == 'monitoring_error')
+            self.assertIn('memory_headroom_unavailable', error['reasons'])
+            try:
+                state = Path(f'/proc/{child_pid}/stat').read_text().split()[2]
+            except FileNotFoundError:
+                state = 'gone'
+            self.assertIn(state, ('gone', 'Z'))
+        finally:
+            if runner.poll() is None: runner.kill(); runner.wait()
+            if child_pid:
+                try: os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+            runner.stdout.close(); runner.stderr.close()
+
+    def test_sigterm_is_forwarded_and_task_does_not_outlive_guard(self):
+        pidfile = self.root / 'signal-child.pid'
+        received = self.root / 'signal-received'
+        code = '\n'.join([
+            'from pathlib import Path', 'import os, signal, sys, time',
+            'def stop(signum, frame):',
+            f'    Path({str(received)!r}).write_text("received")',
+            '    sys.exit(0)',
+            'signal.signal(signal.SIGTERM, stop)',
+            f'Path({str(pidfile)!r}).write_text(str(os.getpid()))',
+            'time.sleep(30)',
+        ])
+        runner = subprocess.Popen(self.args + ['run', '--', sys.executable, '-c', code],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 4
+            while not pidfile.exists() and time.monotonic() < deadline: time.sleep(.03)
+            self.assertTrue(pidfile.exists())
+            child_pid = int(pidfile.read_text())
+            runner.send_signal(signal.SIGTERM)
+            out, err = runner.communicate(timeout=8)
+            self.assertEqual(runner.returncode, 128 + signal.SIGTERM, (out, err))
+            self.assertIn('interrupted', out)
+            self.assertTrue(received.exists(), 'child did not receive SIGTERM')
+            try:
+                state = Path(f'/proc/{child_pid}/stat').read_text().split()[2]
+            except FileNotFoundError:
+                state = 'gone'
+            self.assertIn(state, ('gone', 'Z'))
+        finally:
+            if runner.poll() is None: runner.kill(); runner.wait()
+            if child_pid:
+                try: os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+            runner.stdout.close(); runner.stderr.close()
+
+    def test_guard_uses_sigkill_only_after_grace_period(self):
+        pidfile = self.root / 'ignoring-child.pid'
+        code = '\n'.join([
+            'from pathlib import Path', 'import os, signal, time',
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN)',
+            f'Path({str(pidfile)!r}).write_text(str(os.getpid()))',
+            'time.sleep(30)',
+        ])
+        runner = subprocess.Popen(self.args + ['run', '--', sys.executable, '-c', code],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 4
+            while not pidfile.exists() and time.monotonic() < deadline: time.sleep(.03)
+            self.assertTrue(pidfile.exists())
+            child_pid = int(pidfile.read_text())
+            started = time.monotonic()
+            (self.cg / 'memory.current').write_text(str(700 * MIB))
+            out, err = runner.communicate(timeout=8)
+            self.assertEqual(runner.returncode, 124, (out, err))
+            self.assertGreaterEqual(time.monotonic() - started, 2.5)
+            try:
+                state = Path(f'/proc/{child_pid}/stat').read_text().split()[2]
+            except FileNotFoundError:
+                state = 'gone'
+            self.assertIn(state, ('gone', 'Z'))
+        finally:
+            if runner.poll() is None: runner.kill(); runner.wait()
+            if child_pid:
+                try: os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+            runner.stdout.close(); runner.stderr.close()
+
+    def test_descendants_receive_a_grace_period_before_sigkill(self):
+        ready = self.root / 'grandchild-ready'
+        finished = self.root / 'grandchild-finished'
+        grandchild = '\n'.join([
+            'from pathlib import Path', 'import signal, sys, time',
+            'def stop(signum, frame):',
+            '    time.sleep(0.5)',
+            f'    Path({str(finished)!r}).write_text("finished")',
+            '    sys.exit(0)',
+            'signal.signal(signal.SIGTERM, stop)',
+            f'Path({str(ready)!r}).write_text("ready")',
+            'time.sleep(30)',
+        ])
+        parent_code = (f'import subprocess,time; '
+                       f'subprocess.Popen([{sys.executable!r}, "-c", {grandchild!r}]); time.sleep(30)')
+        runner = subprocess.Popen(self.args + ['run', '--', sys.executable, '-c', parent_code],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 4
+            while not ready.exists() and time.monotonic() < deadline: time.sleep(.03)
+            self.assertTrue(ready.exists())
+            (self.cg / 'memory.current').write_text(str(700 * MIB))
+            out, err = runner.communicate(timeout=8)
+            self.assertEqual(runner.returncode, 124, (out, err))
+            self.assertTrue(finished.exists(), 'descendant was killed before its grace period')
+        finally:
+            if runner.poll() is None: runner.kill(); runner.wait()
+            runner.stdout.close(); runner.stderr.close()
+
+    def test_background_descendants_are_not_left_after_leader_exits(self):
+        ready = self.root / 'background-ready'
+        cleaned = self.root / 'background-cleaned'
+        grandchild = '\n'.join([
+            'from pathlib import Path', 'import signal, sys, time',
+            'def stop(signum, frame):',
+            f'    Path({str(cleaned)!r}).write_text("stopped")',
+            '    sys.exit(0)',
+            'signal.signal(signal.SIGTERM, stop)',
+            f'Path({str(ready)!r}).write_text("ready")',
+            'time.sleep(30)',
+        ])
+        parent_code = '\n'.join([
+            'from pathlib import Path', 'import subprocess, time',
+            f'subprocess.Popen([{sys.executable!r}, "-c", {grandchild!r}])',
+            'deadline = time.monotonic() + 4',
+            f'while not Path({str(ready)!r}).exists() and time.monotonic() < deadline:',
+            '    time.sleep(0.03)',
+        ])
+        run = subprocess.run(self.args + ['run', '--', sys.executable, '-c', parent_code],
+                             capture_output=True, text=True, timeout=8)
+        self.assertEqual(run.returncode, 0, (run.stdout, run.stderr))
+        self.assertTrue(cleaned.exists(), 'background child was left without supervision')
+
+    def test_invalid_interval_and_missing_command_are_reported(self):
+        for interval in ('nan', 'inf', '0.1'):
+            run = subprocess.run(self.args + ['daemon', '--interval', interval], capture_output=True, text=True, timeout=5)
+            self.assertEqual(run.returncode, 2)
+            self.assertIn('finite number', run.stderr)
+        run = subprocess.run(self.args + ['run', '--', '/definitely/nonexistent/command'],
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 127)
+        self.assertIn('command_not_found', run.stdout)
+
 if __name__ == '__main__': unittest.main()
