@@ -6,6 +6,12 @@ import shutil
 import stat
 
 MIB = 1024 * 1024
+GIB = 1024 * MIB
+DISK_STOP_BYTES = 512 * MIB
+DISK_WARN_BYTES = 2 * GIB
+RUN_HEADROOM_STOP_BYTES = 256 * MIB
+RUN_CGROUP_USAGE_STOP = 0.80
+
 EXCLUDED_DIRS = frozenset({
     '.arena', '.cache', '.local', '.mypy_cache', '.next', '.nox', '.npm', '.nuxt',
     '.output', '.parcel-cache', '.playwright-cli', '.pytest_cache', '.ruff_cache',
@@ -61,33 +67,98 @@ def eligible_files(root, min_bytes):
 
 def _read_number(path):
     try:
-        raw = Path(path).read_text().strip()
-        return None if raw == 'max' else int(raw)
+        number = int(Path(path).read_text().strip())
+        return number if number >= 0 else None
     except (OSError, ValueError):
         return None
 
 
-def health(cgroup, meminfo, root):
-    cgroup, meminfo = Path(cgroup), Path(meminfo)
-    limit = _read_number(cgroup / 'memory.max')
-    current = _read_number(cgroup / 'memory.current')
-    system_available = None
+def _read_limit(path):
+    """Distinguish an unlimited cgroup from an unreadable or invalid limit."""
+    try:
+        raw = Path(path).read_text().strip()
+        if raw == 'max':
+            return 'unlimited', None
+        value = int(raw)
+        if value >= 0:
+            return 'limited', value
+    except (OSError, ValueError):
+        pass
+    return 'unknown', None
+
+
+def _cgroup_ancestors(cgroup, cgroup_root):
+    """Return visible ancestors, never traversing beyond the selected boundary."""
+    cgroup = Path(cgroup).resolve()
+    system_root = Path('/sys/fs/cgroup').resolve()
+    if cgroup_root is None:
+        # Custom fixtures/paths inspect only their leaf unless a boundary is given.
+        boundary = system_root if cgroup == system_root or system_root in cgroup.parents else cgroup
+    else:
+        boundary = Path(cgroup_root).resolve()
+    if cgroup != boundary and boundary not in cgroup.parents:
+        return [], ['cgroup_outside_root']
+    paths = [cgroup]
+    while paths[-1] != boundary:
+        paths.append(paths[-1].parent)
+    return paths, []
+
+
+def health(cgroup, meminfo, root, cgroup_root=None):
+    cgroup, meminfo = Path(cgroup).resolve(), Path(meminfo)
+    groups, errors = _cgroup_ancestors(cgroup, cgroup_root)
+    measurements, remaining, ratios = [], [], []
+
+    for group in groups:
+        limit_file = group / 'memory.max'
+        # The actual cgroup-v2 mount root has no memory.max on some kernels.
+        if group == Path('/sys/fs/cgroup').resolve() and not limit_file.exists():
+            continue
+        kind, limit = _read_limit(limit_file)
+        current = _read_number(group / 'memory.current')
+        measurements.append({'path': str(group), 'limit_kind': kind,
+                             'limit_bytes': limit, 'current_bytes': current})
+        if kind == 'unknown':
+            errors.append('cgroup_limit_unavailable:' + str(group))
+        elif kind == 'limited':
+            if current is None:
+                errors.append('cgroup_current_unavailable:' + str(group))
+            else:
+                remaining.append(max(0, limit - current))
+                ratios.append(current / limit if limit else 1.0)
+
+    host_available = None
     try:
         for line in meminfo.read_text().splitlines():
             if line.startswith('MemAvailable:'):
-                system_available = int(line.split()[1]) * 1024
+                amount = int(line.split()[1])
+                if amount >= 0:
+                    host_available = amount * 1024
                 break
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         pass
-    remaining = [x for x in (system_available, limit - current if limit is not None and current is not None else None) if x is not None]
+    if host_available is None:
+        errors.append('mem_available_unavailable')
+    else:
+        remaining.append(host_available)
+
+    leaf = next((entry for entry in measurements if entry['path'] == str(cgroup)), {})
     events = {}
     try:
         events = {key: int(value) for key, value in (line.split() for line in (cgroup / 'memory.events').read_text().splitlines())}
     except (OSError, ValueError):
         pass
-    return {'limit_bytes': limit, 'current_bytes': current,
-            'headroom_bytes': max(0, min(remaining)) if remaining else None,
-            'disk_free_bytes': shutil.disk_usage(root).free, 'events': events}
+    try:
+        disk_free = shutil.disk_usage(root).free
+    except OSError:
+        disk_free = None
+
+    return {'limit_bytes': leaf.get('limit_bytes'), 'current_bytes': leaf.get('current_bytes'),
+            'headroom_bytes': min(remaining) if remaining and not errors else None,
+            'host_available_bytes': host_available,
+            'memory_usage_ratio': max(ratios) if ratios and not errors else None,
+            'memory_telemetry_errors': errors, 'cgroups': measurements,
+            'disk_free_bytes': disk_free, 'events': events}
 
 
 def evaluate(report):
@@ -95,6 +166,7 @@ def evaluate(report):
     size, count = a['candidate_bytes'], a['candidate_files']
     head = h.get('headroom_bytes')
     free = h.get('disk_free_bytes')
+    ratio = h.get('memory_usage_ratio')
     stop = []
     warn = []
     if size >= 100_000_000: stop.append('workspace_candidates >= 100 MB')
@@ -103,6 +175,29 @@ def evaluate(report):
     elif count >= 7000: warn.append('workspace_files >= 7000')
     if head is not None and head < 384 * MIB: stop.append('headroom < 384 MiB')
     elif head is not None and head < 512 * MIB: warn.append('headroom < 512 MiB')
-    if free is not None and free < 2 * 1024**3: warn.append('disk_free < 2 GiB')
     if head is None: stop.append('memory_headroom_unavailable')
+    if ratio is not None and ratio >= RUN_CGROUP_USAGE_STOP: stop.append('cgroup_usage >= 80%')
+    elif ratio is not None and ratio >= 0.70: warn.append('cgroup_usage >= 70%')
+    if free is None: stop.append('disk_free_unavailable')
+    elif free < DISK_STOP_BYTES: stop.append('disk_free < 512 MiB')
+    elif free < DISK_WARN_BYTES: warn.append('disk_free < 2 GiB')
     return {'level': 'stop' if stop else ('warn' if warn else 'pass'), 'reasons': stop + warn}
+
+
+def runtime_guard(h):
+    """Classify runtime resource boundaries, separately from preflight policy."""
+    head, free = h.get('headroom_bytes'), h.get('disk_free_bytes')
+    missing = []
+    if head is None: missing.append('memory_headroom_unavailable')
+    if free is None: missing.append('disk_free_unavailable')
+    if missing:
+        return {'status': 'monitoring_error', 'reasons': missing}
+    reasons = []
+    ratio = h.get('memory_usage_ratio')
+    if ratio is not None and ratio >= RUN_CGROUP_USAGE_STOP:
+        reasons.append('cgroup_usage >= 80%')
+    if head < RUN_HEADROOM_STOP_BYTES:
+        reasons.append('headroom < 256 MiB')
+    if free < DISK_STOP_BYTES:
+        reasons.append('disk_free < 512 MiB')
+    return {'status': 'guard_stop', 'reasons': reasons} if reasons else None

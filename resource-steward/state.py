@@ -79,16 +79,24 @@ class Store:
     def event_count(self):
         return self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
 
-    def set_alerts(self, keys):
+    def update_alerts(self, keys):
+        """Record alert transitions once, including recovery, in a bounded journal."""
         keys = set(keys)
         before = {row[0] for row in self.db.execute('SELECT key FROM active_alerts')}
         new = sorted(keys - before)
-        removed = before - keys
+        cleared = sorted(before - keys)
         with self.db:
-            for key in removed:
+            for key in cleared:
                 self.db.execute('DELETE FROM active_alerts WHERE key=?', (key,))
+                self.db.execute('INSERT INTO events (created,kind,details) VALUES (?,?,?)',
+                                (time.time(), 'alert_cleared', key[:512]))
             for key in new:
                 self.db.execute('INSERT INTO active_alerts (key) VALUES (?)', (key,))
-                self.db.execute('INSERT INTO events (created,kind,details) VALUES (?,?,?)', (time.time(), 'alert', key[:512]))
+                self.db.execute('INSERT INTO events (created,kind,details) VALUES (?,?,?)',
+                                (time.time(), 'alert', key[:512]))
             self.db.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 200)')
-        return new
+        return {'new': new, 'cleared': cleared}
+
+    def set_alerts(self, keys):
+        # Preserve the existing API for callers that only need newly raised alerts.
+        return self.update_alerts(keys)['new']
