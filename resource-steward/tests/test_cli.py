@@ -77,6 +77,34 @@ class CliTests(unittest.TestCase):
         bad = subprocess.run(self.args + ['record-upload','--path',str(big),'--drive-id','some-id','--verified-bytes','1'],capture_output=True,text=True,timeout=5)
         self.assertNotEqual(bad.returncode,0)
 
+    def test_record_upload_labels_operator_attestation_without_cloud_check(self):
+        # A matching local size is not proof that a remote Drive file exists.
+        artifact = self.root / 'sample.bin'
+        with artifact.open('wb') as f: f.truncate(25_000_000)
+        scan = subprocess.run(self.args + ['daemon', '--once'],
+                              capture_output=True, text=True, timeout=5)
+        self.assertEqual(scan.returncode, 0, scan.stderr)
+        record = subprocess.run(self.args + ['record-upload', '--path', str(artifact),
+                                             '--drive-id', 'NOT_A_REAL_DRIVE_ID',
+                                             '--verified-bytes', '25000000'],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(record.returncode, 0, record.stderr)
+        result = json.loads(record.stdout)
+        self.assertEqual(result['status'], 'verified')  # existing public status
+        self.assertEqual(result['verification_source'], 'operator')
+        self.assertIs(result['remote_verified_by_tool'], False)
+        help_result = subprocess.run([sys.executable, str(SCRIPT), 'record-upload', '--help'],
+                                     capture_output=True, text=True, timeout=5)
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn('does not contact Drive', help_result.stdout)
+
+    def test_corrupt_state_fails_with_structured_error(self):
+        self.state.write_bytes(b'not a sqlite database')
+        result = subprocess.run(self.args + ['queue'], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 5)
+        self.assertEqual(json.loads(result.stdout)['status'], 'storage_error')
+        self.assertNotIn('Traceback', result.stderr)
+
     def test_daemon_queues_dedicated_excluded_staging_area(self):
         stage = self.root / '.cache' / 'resource-steward'
         stage.mkdir(parents=True)
