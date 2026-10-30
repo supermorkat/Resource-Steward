@@ -1,6 +1,6 @@
 # Resource Steward
 
-**Language:** English · [العربية](Resource-Steward/docs/guides/README.ar.md) · [Français](Resource-Steward/docs/guides/README.fr.md) · [Español](Resource-Steward/docs/guides/README.es.md)
+**Language:** English · [العربية](/Resource-Steward/docs/guides/README.ar.md) · [Français](Resource-Steward/docs/guides/README.fr.md) · [Español](Resource-Steward/docs/guides/README.es.md)
 
 Resource Steward is a lightweight Python utility for monitoring resource pressure in Linux-based Arena-like sessions, checking conditions before expensive tasks, supervising commands it launches, and organizing reviews of large files.
 
