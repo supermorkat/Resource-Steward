@@ -48,9 +48,3 @@ Project status
 See the repository for current implementation details, issues, and changes: supermorkat/Resource-Steward.
 
 License: No license is selected in the documentation at the time this README was prepared. Do not assume the project is open source or that reuse, modification, or redistribution is permitted until a license is added.
-
-Language guides
-English
-العربية — Arabic
-Français — French
-Español — Spanish
