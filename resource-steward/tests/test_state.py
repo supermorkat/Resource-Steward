@@ -78,11 +78,31 @@ class StoreTests(unittest.TestCase):
                     INSERT INTO active_alerts VALUES ('disk');
                 """)
             with Store(db_path) as store:
-                self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 1)
-                self.assertEqual(store.db.execute('SELECT drive_id FROM queue').fetchone()[0], 'id')
+                self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 2)
+                row = store.db.execute('SELECT drive_id,verification_source FROM queue').fetchone()
+                self.assertEqual((row['drive_id'], row['verification_source']), ('id', 'operator'))
                 self.assertEqual(store.db.execute('SELECT key FROM active_alerts').fetchone()[0], 'disk')
             with Store(db_path) as store:
                 self.assertEqual(store.db.execute('SELECT count(*) FROM queue').fetchone()[0], 1)
+
+    def test_v1_database_is_upgraded_to_v2_without_losing_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / 'state.sqlite'
+            with sqlite3.connect(db_path) as db:
+                db.executescript("""
+                    CREATE TABLE queue (path TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                        mtime_ns INTEGER NOT NULL, status TEXT NOT NULL, drive_id TEXT,
+                        verified_bytes INTEGER, checksum TEXT, updated REAL NOT NULL);
+                    CREATE TABLE events (id INTEGER PRIMARY KEY, created REAL NOT NULL,
+                        kind TEXT NOT NULL, details TEXT NOT NULL);
+                    CREATE TABLE active_alerts (key TEXT PRIMARY KEY);
+                    INSERT INTO queue VALUES ('/old/file',3,123,'verified','id',3,NULL,0);
+                    PRAGMA user_version=1;
+                """)
+            with Store(db_path) as store:
+                self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 2)
+                row = store.db.execute('SELECT status,verification_source FROM queue').fetchone()
+                self.assertEqual(tuple(row), ('verified', 'operator'))
 
     def test_unknown_or_incomplete_schema_fails_without_replacement(self):
         with tempfile.TemporaryDirectory() as d:

@@ -13,6 +13,7 @@ import sys
 import time
 
 from core import audit, eligible_files, evaluate, health, runtime_guard
+from drive_verify import verify_drive_binary
 from state import Store, UnsupportedSchemaVersion
 
 
@@ -216,6 +217,10 @@ def _main(argv=None):
     record_p.add_argument('--verified-bytes', required=True, type=int,
                           help='remote size confirmed by the operator; compared with the local queued size')
     record_p.add_argument('--checksum', help='optional operator-supplied checksum; not computed or checked by this tool')
+    verify_p = sub.add_parser('verify-drive-upload',
+                              help='opt-in check of Drive binary size/MD5 using an OAuth token from the environment')
+    verify_p.add_argument('--path', type=Path, required=True)
+    verify_p.add_argument('--drive-id', required=True)
     args = parser.parse_args(argv)
     args.root = args.root.resolve()
     args.state = args.state or args.root / 'resource-steward' / 'state.sqlite'
@@ -230,6 +235,17 @@ def _main(argv=None):
     if args.action == 'run': return supervise(args)
     with Store(args.state) as store:
         if args.action == 'queue': emit(store.pending()); return 0
+        if args.action == 'verify-drive-upload':
+            try:
+                checked = verify_drive_binary(args.path, args.drive_id,
+                                              os.environ.get('RESOURCE_STEWARD_DRIVE_TOKEN'))
+                result = store.record_verified(args.path, args.drive_id, checked['size'],
+                                               checked['md5'], verification_source='remote_checksum_checked')
+            except (ValueError, OSError) as exc:
+                emit({'status': 'error', 'detail': str(exc)[:160]})
+                return 2
+            emit(result)
+            return 0
         if args.action == 'record-upload':
             try:
                 result = store.record_verified(args.path, args.drive_id, args.verified_bytes, args.checksum)

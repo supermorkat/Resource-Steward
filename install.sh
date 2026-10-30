@@ -13,10 +13,10 @@ if [ ! -f "$SRC/resource-steward/steward.py" ]; then
   exit 2
 fi
 mkdir -p "$DEST/resource-steward/tests" "$DEST/bin"
-for name in core.py state.py steward.py README.md; do
+for name in core.py state.py drive_verify.py steward.py README.md; do
   cp "$SRC/resource-steward/$name" "$DEST/resource-steward/$name"
 done
-for name in test_cli.py test_core.py test_state.py; do
+for name in test_cli.py test_core.py test_state.py test_drive_verify.py test_checkpoint.py; do
   cp "$SRC/resource-steward/tests/$name" "$DEST/resource-steward/tests/$name"
 done
 cat > "$DEST/bin/resource-steward" <<'LAUNCHER'
