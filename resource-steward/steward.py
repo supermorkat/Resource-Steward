@@ -13,7 +13,7 @@ import sys
 import time
 
 from core import audit, eligible_files, evaluate, health, runtime_guard
-from state import Store
+from state import Store, UnsupportedSchemaVersion
 
 
 def default_cgroup():
@@ -192,7 +192,7 @@ def supervise(args):
             signal.signal(signum, previous)
 
 
-def main(argv=None):
+def _main(argv=None):
     parser = argparse.ArgumentParser(description='Local resource protection; no native Arena hook or unattended Drive credentials')
     parser.add_argument('--root', type=Path, default=Path('/home/user'))
     parser.add_argument('--cgroup', type=Path, default=default_cgroup())
@@ -206,11 +206,16 @@ def main(argv=None):
     daemon_p.add_argument('--once', action='store_true')
     run_p = sub.add_parser('run')
     run_p.add_argument('command', nargs=argparse.REMAINDER)
-    record_p = sub.add_parser('record-upload')
-    record_p.add_argument('--path', type=Path, required=True)
-    record_p.add_argument('--drive-id', required=True)
-    record_p.add_argument('--verified-bytes', required=True, type=int)
-    record_p.add_argument('--checksum')
+    record_p = sub.add_parser(
+        'record-upload',
+        help='record an operator-confirmed upload (does not contact Drive)',
+        description='Record an operator-confirmed upload. This tool does not contact Drive or verify the remote file.')
+    record_p.add_argument('--path', type=Path, required=True, help='local queued file')
+    record_p.add_argument('--drive-id', required=True,
+                          help='Drive ID supplied by the operator; not checked remotely')
+    record_p.add_argument('--verified-bytes', required=True, type=int,
+                          help='remote size confirmed by the operator; compared with the local queued size')
+    record_p.add_argument('--checksum', help='optional operator-supplied checksum; not computed or checked by this tool')
     args = parser.parse_args(argv)
     args.root = args.root.resolve()
     args.state = args.state or args.root / 'resource-steward' / 'state.sqlite'
@@ -234,6 +239,15 @@ def main(argv=None):
             emit(result)
             return 0
     return 2
+
+
+def main(argv=None):
+    try:
+        return _main(argv)
+    except (sqlite3.DatabaseError, UnsupportedSchemaVersion) as exc:
+        emit({'status': 'storage_error', 'error': type(exc).__name__,
+              'detail': str(exc)[:160]})
+        return 5
 
 
 if __name__ == '__main__':
