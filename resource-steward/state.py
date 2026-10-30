@@ -4,7 +4,7 @@ import sqlite3
 import time
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXPECTED_COLUMNS = {
     'queue': {'path', 'size', 'mtime_ns', 'status', 'drive_id',
               'verified_bytes', 'checksum', 'updated'},
@@ -49,8 +49,13 @@ class Store:
                 actual = {row['name'] for row in self.db.execute(f'PRAGMA table_info({table})')}
                 if not expected <= actual:
                     raise sqlite3.DatabaseError(f'unsupported state schema: {table}')
-            if version == 0:
-                self.db.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+            if version < 2:
+                # V1 and complete legacy V0 databases keep their rows and statuses.
+                self.db.execute('ALTER TABLE queue ADD COLUMN verification_source TEXT')
+                self.db.execute("UPDATE queue SET verification_source='operator' WHERE status='verified'")
+                self.db.execute('PRAGMA user_version = 2')
+            elif 'verification_source' not in {row['name'] for row in self.db.execute('PRAGMA table_info(queue)')}:
+                raise sqlite3.DatabaseError('unsupported state schema: queue.verification_source')
 
     def close(self):
         self.db.close()
@@ -68,7 +73,7 @@ class Store:
             existing = self.db.execute('SELECT * FROM queue WHERE path=?', (path,)).fetchone()
             if existing and existing['size'] == size and existing['mtime_ns'] == mtime_ns and existing['status'] in ('pending','verified'):
                 return False
-            self.db.execute('INSERT INTO queue (path,size,mtime_ns,status,drive_id,verified_bytes,checksum,updated) VALUES (?,?,?,\'pending\',NULL,NULL,NULL,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,status=\'pending\',drive_id=NULL,verified_bytes=NULL,checksum=NULL,updated=excluded.updated',
+            self.db.execute('INSERT INTO queue (path,size,mtime_ns,status,drive_id,verified_bytes,checksum,updated) VALUES (?,?,?,\'pending\',NULL,NULL,NULL,?) ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,status=\'pending\',drive_id=NULL,verified_bytes=NULL,checksum=NULL,verification_source=NULL,updated=excluded.updated',
                             (path,size,mtime_ns,time.time()))
         return True
 
@@ -89,10 +94,12 @@ class Store:
             valid.append(dict(row))
         return valid
 
-    def record_verified(self, path, drive_id, verified_bytes, checksum=None):
+    def record_verified(self, path, drive_id, verified_bytes, checksum=None, verification_source='operator'):
         """Record an operator's remote-upload attestation; never contact Drive."""
         if not drive_id or not str(drive_id).strip() or len(str(drive_id)) > 256:
             raise ValueError('non-empty operator-supplied Drive file ID required')
+        if verification_source not in ('operator', 'remote_checksum_checked'):
+            raise ValueError('unsupported verification source')
         path = str(Path(path).absolute())
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
@@ -108,13 +115,13 @@ class Store:
                 raise ValueError('source changed since queueing')
             if row['size'] != verified_bytes:
                 raise ValueError('remote size differs from queued local size')
-            self.db.execute("UPDATE queue SET status='verified', drive_id=?, verified_bytes=?, checksum=?, updated=? WHERE path=?",
-                            (str(drive_id), verified_bytes, checksum, time.time(), path))
+            self.db.execute("UPDATE queue SET status='verified', drive_id=?, verified_bytes=?, checksum=?, verification_source=?, updated=? WHERE path=?",
+                            (str(drive_id), verified_bytes, checksum, verification_source, time.time(), path))
         # Keep the legacy status for existing databases/consumers. These fields
         # clarify that the tool has not independently verified the remote file.
         return {'path': path, 'drive_file_id': str(drive_id), 'bytes': verified_bytes,
-                'status': 'verified', 'verification_source': 'operator',
-                'remote_verified_by_tool': False}
+                'status': 'verified', 'verification_source': verification_source,
+                'remote_verified_by_tool': verification_source == 'remote_checksum_checked'}
 
     def event(self, kind, details):
         with self.db:
