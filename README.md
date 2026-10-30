@@ -1,63 +1,56 @@
-# Resource Steward
+Resource Steward
+Language: English · العربية · Français · Español
 
-أداة Python خفيفة لمراقبة موارد جلسات **Arena**، والتنبيه قبل المهام الثقيلة، وتنظيم مراجعة الملفات الكبيرة. المشروع مستقل وغير رسمي، وليس جزءًا مدمجًا في Arena أو Google Drive.
+Resource Steward is a lightweight Python utility for monitoring resource pressure in Linux-based Arena-like sessions, checking conditions before expensive tasks, supervising commands it launches, and organizing reviews of large files.
 
-## ماذا تفعل؟
+Scope and safety: This is an independent, unofficial tool—not a built-in Arena or Google Drive feature. It does not automatically upload or delete files. Review commands and permissions before running them.
 
-- تقيس هامش الذاكرة عبر حدود cgroup المرئية ومساحة القرص، وتقدّر عدد الملفات وحجمها المرشّح للحفظ في لقطة الجلسة.
-- تفحص الموارد قبل تشغيل مهمة ثقيلة وتُبلغ عن انخفاضها وتعافيها؛ ويمكنها إيقاف المهمة التي تشغّلها عند بلوغ حدود الذاكرة أو القرص أو فقدان القياسات.
-- تعدّ قائمة بالملفات الكبيرة لمراجعتها. الرفع إلى Google Drive يتطلب تدخل المساعد وموصل Drive؛ **الأداة لا ترفع الملفات ولا تحذفها تلقائيًا**. أمر `record-upload` يسجل تأكيد المشغّل؛ الأمر الاختياري المنفصل `verify-drive-upload` يقارن حجم وبصمة MD5 لملف ثنائي بعيد إذا وفّر المستخدم رمز قراءة عبر البيئة. لا يحصل على رمز موصل المحادثة تلقائيًا.
+What it does
+Reads visible Linux cgroup v2 memory information, host available memory, and free disk space.
+Estimates workspace file counts and sizes that may be included in a session snapshot.
+Runs preflight checks and reports resource pressure or recovery.
+Can supervise a child command and stop its process group when configured limits are reached or monitoring fails.
+Maintains a local SQLite queue for reviewing large files.
+Can verify the size and MD5 checksum of an existing Google Drive file when configured with a read token.
+Includes a sample demonstrating application-level checkpoints and resumption.
+Requirements
+Linux with /proc and cgroup v2.
+Python 3.10 or newer.
+A POSIX-compatible shell and Git.
+No third-party Python packages are required for the core utility.
+The project targets Linux/Arena-like environments; it is not documented as a general-purpose Android/Termux, macOS, or Windows utility.
 
-المراقبة تقديرية ولا تضمن منع نفاد الذاكرة أو حفظ جميع الملفات. الخدمة الخلفية مؤقتة ولا تُستعاد تلقائيًا بعد إعادة تهيئة الجلسة؛ توجد [مهمة نموذجية تدعم الاستئناف](examples/checkpointed_task.py)، لكن `run` لا يجعل المهام الأخرى قابلة للاستئناف من تلقاء نفسه. أُنجز اختبار منفصل لرفع ملف اصطناعي حجمه 110,000,000 بايت واسترجاعه مع تطابق SHA-256 عبر موصل Drive؛ لا يثبت ذلك أن الأداة ترفع تلقائيًا. التفاصيل والحدود في [دليل الأداة](resource-steward/README.md).
+Getting started
+Clone the repository:
 
-## المتطلبات
+git clone https://github.com/supermorkat/Resource-Steward.git
+cd Resource-Steward
+Inspect the available commands and options before use:
 
-- Linux مع `/proc` وواجهة cgroup v2؛ تستهدف الأداة بيئة Arena على وجه الخصوص.
-- Python 3.10 أو أحدث وصدفة متوافقة مع POSIX. لا توجد حزم Python خارجية مطلوبة.
-- Git للعمل على المستودع.
-
-## البدء والتثبيت
-
-من داخل مجلد المشروع:
-
-```bash
-# تشغيل الاختبارات دون تثبيت الأداة في حسابك
+python3 --version
 python3 -m unittest discover -s resource-steward/tests -v
+Run commands from the project directory using the repository's documented entry point and options. Check the source/help output for the exact CLI syntax for your checked-out version; do not assume that monitoring alone guarantees a task can be safely stopped or resumed.
 
-# عرض خيارات سطر الأوامر من نسخة المستودع
-python3 resource-steward/steward.py --help
+Important operational notes
+Resource measurements are limited to what the current environment exposes; they are estimates, not guarantees.
+A supervised command may be terminated when configured thresholds are reached or monitoring becomes unavailable. Use this only for commands you are prepared to stop.
+Checkpoints are application-level: a task must explicitly save and restore its own progress.
+Google Drive verification checks metadata for a file that already exists; it does not perform the upload.
+Keep access tokens out of source control and logs. Use the environment-variable mechanism documented by the project.
+Review large-file queue entries before acting on them; do not treat a file as disposable just because it is large.
+Development and testing
+Run the test suite from the repository root:
 
-# التثبيت المحلي (يحدّث ملفات الأداة في $HOME/resource-steward)
-sh install.sh
-~/bin/resource-steward status
-~/bin/resource-steward preflight
-~/bin/resource-steward queue
-```
+python3 -m unittest discover -s resource-steward/tests -v
+Before contributing, review the current implementation, tests, and repository history. Update tests when changing resource thresholds, process supervision, persistence, or Drive verification.
 
-التثبيت لا يبدأ خدمة المراقبة. في Arena يمكن بدء المراقبة عبر أداة العمليات الخلفية باستخدام `~/bin/resource-steward daemon --interval 15`. تثبيت التوجيه الاختياري يتطلب `sh install.sh --enable-agent-guide`، ويضيف إرشادات إلى `~/AGENTS.md` دون مسح محتواه؛ لكنه لا يضمن أن Arena سيقرأ الملف تلقائيًا.
+Project status
+See the repository for current implementation details, issues, and changes: supermorkat/Resource-Steward.
 
-يفترض سطر الأوامر افتراضيًا أن جذر العمل هو `/home/user`. يمكن تغييره بالخيار العام `--root` **قبل** اسم الأمر. يدعم المثبّت أيضًا متغير `RESOURCE_STEWARD_HOME` لمسار تثبيت مطلق بديل؛ تغيير مسار التثبيت لا يغيّر تلقائيًا جذر عمل سطر الأوامر.
+License: No license is selected in the documentation at the time this README was prepared. Do not assume the project is open source or that reuse, modification, or redistribution is permitted until a license is added.
 
-## تطوير المشروع
-
-راجع [دليل المساهمة](CONTRIBUTING.md). يحتوي المستودع على:
-
-- `resource-steward/`: الشيفرة، ودليل الاستخدام التفصيلي، والاختبارات.
-- `examples/`: مثال مستقل لمهمة طويلة تدعم نقاط الاستعادة.
-- `install.sh`: المثبّت المحلي.
-- `AGENTS.snippet.md`: إرشادات اختيارية لمساعد الجلسة.
-- `START-HERE.md`: تعليمات الحزمة الأصلية المضغوطة.
-- `ci/github-actions-tests.yml`: قالب اختبارات GitHub Actions **غير مفعّل**. لتفعيله، انسخه إلى `.github/workflows/tests.yml` باستخدام حساب أو رمز مخوّل بتعديل مهام GitHub Actions.
-
-لا تضع بيانات الحالة أو بيانات المستخدم أو مفاتيح الوصول في المستودع. يستبعد `.gitignore` ملفات الحالة المحلية والبيئات المؤقتة الشائعة، لكنه ليس بديلًا عن مراجعة الملفات قبل مشاركتها.
-
-## أدلة الاستخدام بأربع لغات
-
-- [English](docs/guides/README.md) · [العربية](docs/guides/README.ar.md) · [Français](docs/guides/README.fr.md) · [Español](docs/guides/README.es.md).
-- [تنزيل الأدلة الأربعة في ملف ZIP](downloads/Resource-Steward-Guides-4-Languages-Download.zip).
-
-نُقلت الأدلة من حزمة Google Drive وصُحّح أمر تشغيل الاختبارات ليتوافق مع `unittest` المستخدم في المشروع. بقي هذا README الأساسي ودليل الأداة التفصيلي دون استبدال.
-
-## الترخيص
-
-لم يُحدَّد ترخيص للمشروع بعد. ينبغي لصاحب المشروع اختيار ترخيص مناسب قبل منح الآخرين حقوق إعادة الاستخدام أو المساهمة.
+Language guides
+English
+العربية — Arabic
+Français — French
+Español — Spanish
